@@ -26,10 +26,12 @@ import (
 	"github.com/goodrain/rainbond/api/handler/share"
 	"github.com/goodrain/rainbond/cmd/api/option"
 	"github.com/goodrain/rainbond/db"
+	"github.com/goodrain/rainbond/pkg/generated/clientset/versioned"
 	etcdutil "github.com/goodrain/rainbond/util/etcd"
 	"github.com/goodrain/rainbond/worker/client"
 	"github.com/sirupsen/logrus"
 	"k8s.io/client-go/kubernetes"
+	k8sclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 //InitHandle 初始化handle
@@ -38,6 +40,8 @@ func InitHandle(conf option.Config,
 	statusCli *client.AppRuntimeSyncClient,
 	etcdcli *clientv3.Client,
 	kubeClient *kubernetes.Clientset,
+	rainbondClient versioned.Interface,
+	k8sClient k8sclient.Client,
 ) error {
 	mq := api_db.MQManager{
 		EtcdClientArgs: etcdClientArgs,
@@ -56,10 +60,10 @@ func InitHandle(conf option.Config,
 		return err
 	}
 	dbmanager := db.GetManager()
-	defaultServieHandler = CreateManager(conf, mqClient, etcdcli, statusCli, prometheusCli)
+	defaultServieHandler = CreateManager(conf, mqClient, etcdcli, statusCli, prometheusCli, rainbondClient)
 	defaultPluginHandler = CreatePluginManager(mqClient)
 	defaultAppHandler = CreateAppManager(mqClient)
-	defaultTenantHandler = CreateTenManager(mqClient, statusCli, &conf, kubeClient, prometheusCli)
+	defaultTenantHandler = CreateTenManager(mqClient, statusCli, &conf, kubeClient, prometheusCli, k8sClient)
 	defaultNetRulesHandler = CreateNetRulesManager(etcdcli)
 	defaultCloudHandler = CreateCloudManager(conf)
 	defaultAPPBackupHandler = group.CreateBackupHandle(mqClient, statusCli, etcdcli)
@@ -73,14 +77,15 @@ func InitHandle(conf option.Config,
 	defaultGatewayHandler = CreateGatewayManager(dbmanager, mqClient, etcdcli)
 	def3rdPartySvcHandler = Create3rdPartySvcHandler(dbmanager, statusCli)
 	operationHandler = CreateOperationHandler(mqClient)
-	batchOperationHandler = CreateBatchOperationHandler(mqClient, operationHandler)
+	batchOperationHandler = CreateBatchOperationHandler(mqClient, statusCli, operationHandler)
 	defaultAppRestoreHandler = NewAppRestoreHandler()
 	defPodHandler = NewPodHandler(statusCli)
 	defClusterHandler = NewClusterHandler(kubeClient, conf.RbdNamespace)
 	defaultVolumeTypeHandler = CreateVolumeTypeManger(statusCli)
 	defaultEtcdHandler = NewEtcdHandler(etcdcli)
 	defaultmonitorHandler = NewMonitorHandler(prometheusCli)
-	defApplicationHandler = NewApplicationHandler(statusCli, prometheusCli)
+	defServiceEventHandler = NewServiceEventHandler()
+	defApplicationHandler = NewApplicationHandler(statusCli, prometheusCli, rainbondClient, kubeClient)
 	return nil
 }
 
@@ -219,4 +224,11 @@ var defApplicationHandler ApplicationHandler
 // GetApplicationHandler  returns the default tenant application handler.
 func GetApplicationHandler() ApplicationHandler {
 	return defApplicationHandler
+}
+
+var defServiceEventHandler *ServiceEventHandler
+
+// GetServiceEventHandler -
+func GetServiceEventHandler() *ServiceEventHandler {
+	return defServiceEventHandler
 }

@@ -238,8 +238,9 @@ type HorizontalScalingTaskBody struct {
 type VerticalScalingTaskBody struct {
 	TenantID        string `json:"tenant_id"`
 	ServiceID       string `json:"service_id"`
-	ContainerCPU    int    `json:"container_cpu"`
-	ContainerMemory int    `json:"container_memory"`
+	ContainerCPU    *int   `json:"container_cpu"`
+	ContainerMemory *int   `json:"container_memory"`
+	ContainerGPU    *int   `json:"container_gpu"`
 	EventID         string `json:"event_id"`
 }
 
@@ -306,7 +307,6 @@ type GroupStartTaskBody struct {
 // ApplyRuleTaskBody contains information for ApplyRuleTask
 type ApplyRuleTaskBody struct {
 	ServiceID     string            `json:"service_id"`
-	DeployVersion string            `json:"deploy_version"`
 	EventID       string            `json:"event_id"`
 	ServiceKind   string            `json:"service_kind"`
 	Action        string            `json:"action"`

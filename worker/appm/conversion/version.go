@@ -20,6 +20,7 @@ package conversion
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"sort"
 	"strconv"
@@ -37,6 +38,7 @@ import (
 	"github.com/jinzhu/gorm"
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
@@ -85,6 +87,7 @@ func TenantServiceVersion(as *v1.AppService, dbmanager db.Manager) error {
 			NodeSelector:     nodeSelector,
 			Tolerations:      tolerations,
 			Affinity:         createAffinity(as, dbmanager),
+			HostAliases:      createHostAliases(as),
 			Hostname: func() string {
 				if nodeID, ok := as.ExtensionSet["hostname"]; ok {
 					return nodeID
@@ -132,7 +135,6 @@ func getMainContainer(as *v1.AppService, version *dbmodel.VersionInfo, dv *volum
 			},
 		})
 	}
-
 	args := createArgs(version, envs)
 	resources := createResources(as)
 	ports := createPorts(as, dbmanager)
@@ -272,20 +274,24 @@ func createEnv(as *v1.AppService, dbmanager db.Manager, envVarSecrets []*corev1.
 	if err != nil {
 		return nil, err
 	}
-	if ports != nil && len(ports) > 0 {
+	if len(ports) > 0 {
 		var portStr string
-		for i, port := range ports {
-			if i == 0 {
-				envs = append(envs, corev1.EnvVar{Name: "PORT", Value: strconv.Itoa(ports[0].ContainerPort)})
-				envs = append(envs, corev1.EnvVar{Name: "PROTOCOL", Value: ports[0].Protocol})
+		var minPort int
+		var protocol string
+		for _, port := range ports {
+			if minPort == 0 || minPort > port.ContainerPort {
+				minPort = port.ContainerPort
+				protocol = port.Protocol
 			}
 			if portStr != "" {
 				portStr += ":"
 			}
 			portStr += fmt.Sprintf("%d", port.ContainerPort)
 		}
+		envs = append(envs, corev1.EnvVar{Name: "PORT", Value: strconv.Itoa(minPort)})
+		envs = append(envs, corev1.EnvVar{Name: "PROTOCOL", Value: protocol})
 		menvs := convertRulesToEnvs(as, dbmanager, ports)
-		if envs != nil && len(envs) > 0 {
+		if len(envs) > 0 {
 			envs = append(envs, menvs...)
 		}
 		envs = append(envs, corev1.EnvVar{Name: "MONITOR_PORT", Value: portStr})
@@ -301,9 +307,6 @@ func createEnv(as *v1.AppService, dbmanager db.Manager, envVarSecrets []*corev1.
 	}
 	for _, e := range envsAll {
 		envs = append(envs, corev1.EnvVar{Name: strings.TrimSpace(e.AttrName), Value: e.AttrValue})
-		if strings.HasPrefix(e.AttrName, "ES_") {
-			as.ExtensionSet[strings.ToLower(e.AttrName[3:])] = e.AttrValue
-		}
 	}
 
 	//set default env
@@ -336,7 +339,7 @@ func createEnv(as *v1.AppService, dbmanager db.Manager, envVarSecrets []*corev1.
 	for _, env := range envs {
 		config[env.Name] = env.Value
 	}
-	
+
 	for i, env := range envs {
 		envs[i].Value = util.ParseVariable(env.Value, config)
 	}
@@ -345,7 +348,12 @@ func createEnv(as *v1.AppService, dbmanager db.Manager, envVarSecrets []*corev1.
 			sec.Data[i] = []byte(util.ParseVariable(string(data), config))
 		}
 	}
-
+	// set Extension set config item
+	for k, v := range config {
+		if strings.HasPrefix(k, "ES_") {
+			as.ExtensionSet[strings.ToLower(k[3:])] = v
+		}
+	}
 	return envs, nil
 }
 
@@ -490,7 +498,24 @@ func createResources(as *v1.AppService) corev1.ResourceRequirements {
 			cpuRequest = int64(requestint)
 		}
 	}
-	return createResourcesByDefaultCPU(as.ContainerMemory, cpuRequest, cpuLimit)
+	rr := createResourcesByDefaultCPU(as.ContainerMemory, cpuRequest, cpuLimit)
+	// support set gpu, support application of single GPU video memory.
+	if as.ContainerGPU > 0 {
+		gpuLimit, err := resource.ParseQuantity(fmt.Sprintf("%d", as.ContainerGPU))
+		if err != nil {
+			logrus.Errorf("gpu request is invalid")
+		} else {
+			rr.Limits[getGPULableKey()] = gpuLimit
+		}
+	}
+	return rr
+}
+
+func getGPULableKey() corev1.ResourceName {
+	if os.Getenv("GPU_LABLE_KEY") != "" {
+		return corev1.ResourceName(os.Getenv("GPU_LABLE_KEY"))
+	}
+	return "rainbond.com/gpu-mem"
 }
 
 func checkUpstreamPluginRelation(serviceID string, dbmanager db.Manager) (bool, error) {
@@ -557,7 +582,7 @@ func createPorts(as *v1.AppService, dbmanager db.Manager) (ports []corev1.Contai
 func createProbe(as *v1.AppService, dbmanager db.Manager, mode string) *corev1.Probe {
 	probe, err := dbmanager.ServiceProbeDao().GetServiceUsedProbe(as.ServiceID, mode)
 	if err == nil && probe != nil {
-		if mode == "liveness" && probe.SuccessThreshold < 1 {
+		if mode == "liveness" {
 			probe.SuccessThreshold = 1
 		}
 		if mode == "readiness" && probe.FailureThreshold < 1 {
@@ -639,6 +664,7 @@ func createAffinity(as *v1.AppService, dbmanager db.Manager) *corev1.Affinity {
 	podAffinity := make([]corev1.PodAffinityTerm, 0)
 	podAntAffinity := make([]corev1.PodAffinityTerm, 0)
 	osWindowsSelect := false
+	enableGPU := as.ContainerGPU > 0
 	labels, err := dbmanager.TenantServiceLabelDao().GetTenantServiceAffinityLabel(as.ServiceID)
 	if err == nil && labels != nil && len(labels) > 0 {
 		for _, l := range labels {
@@ -699,11 +725,24 @@ func createAffinity(as *v1.AppService, dbmanager db.Manager) *corev1.Affinity {
 			Values:   []string{"windows"},
 		})
 	}
+	if !enableGPU {
+		nsr = append(nsr, corev1.NodeSelectorRequirement{
+			Key:      client.LabelGPU,
+			Values:   []string{"true"},
+			Operator: corev1.NodeSelectorOpNotIn,
+		})
+	} else {
+		nsr = append(nsr, corev1.NodeSelectorRequirement{
+			Key:      client.LabelGPU,
+			Values:   []string{"true"},
+			Operator: corev1.NodeSelectorOpIn,
+		})
+	}
 	if len(nsr) > 0 {
 		affinity.NodeAffinity = &corev1.NodeAffinity{
 			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
 				NodeSelectorTerms: []corev1.NodeSelectorTerm{
-					corev1.NodeSelectorTerm{MatchExpressions: nsr},
+					{MatchExpressions: nsr},
 				},
 			},
 		}
@@ -753,4 +792,24 @@ func createToleration(nodeSelector map[string]string) []corev1.Toleration {
 		})
 	}
 	return tolerations
+}
+
+func createHostAliases(as *v1.AppService) []corev1.HostAlias {
+	cache := make(map[string]*corev1.HostAlias)
+	for k, v := range as.ExtensionSet {
+		if strings.HasPrefix(k, "host_") {
+			if net.ParseIP(v) != nil {
+				if cache[v] != nil {
+					cache[v].Hostnames = append(cache[v].Hostnames, k[5:])
+				} else {
+					cache[v] = &corev1.HostAlias{IP: v, Hostnames: []string{k[5:]}}
+				}
+			}
+		}
+	}
+	var re []corev1.HostAlias
+	for k := range cache {
+		re = append(re, *cache[k])
+	}
+	return re
 }

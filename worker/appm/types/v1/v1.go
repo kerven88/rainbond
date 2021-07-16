@@ -22,7 +22,9 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
+	dbmodel "github.com/goodrain/rainbond/db/model"
 	monitorv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	"github.com/sirupsen/logrus"
 	v1 "k8s.io/api/apps/v1"
@@ -30,6 +32,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	extensions "k8s.io/api/extensions/v1beta1"
 	storagev1 "k8s.io/api/storage/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 
 	"github.com/goodrain/rainbond/builder"
 	"github.com/goodrain/rainbond/db/model"
@@ -87,9 +91,11 @@ type AppServiceBase struct {
 	ServiceAlias     string
 	ServiceType      AppServiceType
 	ServiceKind      model.ServiceKind
+	discoveryCfg     *dbmodel.ThirdPartySvcDiscoveryCfg
 	DeployVersion    string
 	ContainerCPU     int
 	ContainerMemory  int
+	ContainerGPU     int
 	UpgradeMethod    TypeUpgradeMethod
 	Replicas         int
 	NeedProxy        bool
@@ -101,12 +107,42 @@ type AppServiceBase struct {
 	GovernanceMode string
 }
 
+//GetComponentDefinitionName get component definition name by component kind
+func (a AppServiceBase) GetComponentDefinitionName() string {
+	if strings.HasPrefix(a.ServiceKind.String(), dbmodel.ServiceKindCustom.String()) {
+		return strings.Replace(a.ServiceKind.String(), dbmodel.ServiceKindCustom.String(), "", 1)
+	}
+	if a.discoveryCfg != nil && a.discoveryCfg.Type == dbmodel.DiscorveryTypeKubernetes.String() {
+		return "core-thirdcomponent"
+	}
+	return ""
+}
+
+func (a AppServiceBase) IsCustomComponent() bool {
+	if strings.HasPrefix(a.ServiceKind.String(), dbmodel.ServiceKindCustom.String()) {
+		return true
+	}
+	if a.discoveryCfg != nil && a.discoveryCfg.Type == dbmodel.DiscorveryTypeKubernetes.String() {
+		return true
+	}
+	return false
+}
+
+func (a AppServiceBase) IsThirdComponent() bool {
+	return a.ServiceKind.String() == dbmodel.ServiceKindThirdParty.String()
+}
+
+func (a *AppServiceBase) SetDiscoveryCfg(discoveryCfg *dbmodel.ThirdPartySvcDiscoveryCfg) {
+	a.discoveryCfg = discoveryCfg
+}
+
 //AppService a service of rainbond app state in kubernetes
 type AppService struct {
 	AppServiceBase
 	tenant         *corev1.Namespace
 	statefulset    *v1.StatefulSet
 	deployment     *v1.Deployment
+	workload       runtime.Object
 	hpas           []*autoscalingv2.HorizontalPodAutoscaler
 	delHPAs        []*autoscalingv2.HorizontalPodAutoscaler
 	replicasets    []*v1.ReplicaSet
@@ -123,7 +159,6 @@ type AppService struct {
 	serviceMonitor []*monitorv1.ServiceMonitor
 	// claims that needs to be created manually
 	claimsmanual     []*corev1.PersistentVolumeClaim
-	status           AppServiceStatus
 	podMemoryRequest int64
 	podCPURequest    int64
 	BootSeqContainer *corev1.Container
@@ -132,6 +167,8 @@ type AppService struct {
 	UpgradePatch     map[string][]byte
 	CustomParams     map[string]string
 	envVarSecrets    []*corev1.Secret
+	// custom componentdefinition output manifests
+	manifests []*unstructured.Unstructured
 }
 
 //CacheKey app cache key
@@ -139,10 +176,7 @@ type CacheKey string
 
 //Equal cache key serviceid and version and createID Equal
 func (c CacheKey) Equal(end CacheKey) bool {
-	if string(c) == string(end) {
-		return true
-	}
-	return false
+	return string(c) == string(end)
 }
 
 //GetCacheKeyOnlyServiceID get cache key only service id
@@ -158,6 +192,7 @@ func (a AppService) GetDeployment() *v1.Deployment {
 //SetDeployment set kubernetes deployment model
 func (a *AppService) SetDeployment(d *v1.Deployment) {
 	a.deployment = d
+	a.workload = d
 	if v, ok := d.Spec.Template.Labels["version"]; ok && v != "" {
 		a.DeployVersion = v
 	}
@@ -178,6 +213,7 @@ func (a AppService) GetStatefulSet() *v1.StatefulSet {
 //SetStatefulSet set kubernetes statefulset model
 func (a *AppService) SetStatefulSet(d *v1.StatefulSet) {
 	a.statefulset = d
+	a.workload = d
 	if v, ok := d.Spec.Template.Labels["version"]; ok && v != "" {
 		a.DeployVersion = v
 	}
@@ -795,6 +831,31 @@ func (a *AppService) GetCPURequest() (res int64) {
 		res += CalculatePodResource(pod).CPURequest
 	}
 	return
+}
+
+//GetManifests get component custom manifest
+func (a *AppService) GetManifests() []*unstructured.Unstructured {
+	return a.manifests
+}
+
+//GetManifests get component custom manifest
+func (a *AppService) SetManifests(manifests []*unstructured.Unstructured) {
+	a.manifests = manifests
+}
+
+//SetWorkload set component workload
+func (a *AppService) SetWorkload(workload runtime.Object) {
+	a.workload = workload
+}
+
+//GetWorkload get component workload
+func (a *AppService) GetWorkload() runtime.Object {
+	return a.workload
+}
+
+//DeleteWorkload delete component workload
+func (a *AppService) DeleteWorkload(workload runtime.Object) {
+	a.workload = nil
 }
 
 func (a *AppService) String() string {

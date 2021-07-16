@@ -21,6 +21,7 @@ package option
 import (
 	"fmt"
 	"os"
+	"path"
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/pflag"
@@ -41,6 +42,8 @@ type Config struct {
 	PrometheusMetricPath    string
 	EventLogServers         []string
 	KubeConfig              string
+	KubeAPIQPS              int
+	KubeAPIBurst            int
 	MaxTasks                int
 	MQAPI                   string
 	NodeName                string
@@ -52,6 +55,15 @@ type Config struct {
 	LeaderElectionIdentity  string
 	RBDNamespace            string
 	GrdataPVCName           string
+	Helm                    Helm
+}
+
+// Helm helm configuration.
+type Helm struct {
+	DataDir    string
+	RepoFile   string
+	RepoCache  string
+	ChartCache string
 }
 
 //Worker  worker server
@@ -81,6 +93,8 @@ func (a *Worker) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&a.MysqlConnectionInfo, "mysql", "root:admin@tcp(127.0.0.1:3306)/region", "mysql db connection info")
 	fs.StringSliceVar(&a.EventLogServers, "event-servers", []string{"127.0.0.1:6366"}, "event log server address. simple lb")
 	fs.StringVar(&a.KubeConfig, "kube-config", "", "kubernetes api server config file")
+	fs.IntVar(&a.KubeAPIQPS, "kube-api-qps", 50, "kube client qps")
+	fs.IntVar(&a.KubeAPIBurst, "kube-api-burst", 10, "kube clint burst")
 	fs.IntVar(&a.MaxTasks, "max-tasks", 50, "the max tasks for per node")
 	fs.StringVar(&a.MQAPI, "mq-api", "127.0.0.1:6300", "acp_mq api")
 	fs.StringVar(&a.RunMode, "run", "sync", "sync data when worker start")
@@ -91,6 +105,14 @@ func (a *Worker) AddFlags(fs *pflag.FlagSet) {
 	fs.StringVar(&a.LeaderElectionIdentity, "leader-election-identity", "", "Unique idenity of this attcher. Typically name of the pod where the attacher runs.")
 	fs.StringVar(&a.RBDNamespace, "rbd-system-namespace", "rbd-system", "rbd components kubernetes namespace")
 	fs.StringVar(&a.GrdataPVCName, "grdata-pvc-name", "rbd-cpt-grdata", "The name of grdata persistent volume claim")
+	fs.StringVar(&a.Helm.DataDir, "helm-data-dir", "helm-data-dir", "The data directory of Helm.")
+
+	if a.Helm.DataDir == "" {
+		a.Helm.DataDir = "/grdata/helm"
+	}
+	a.Helm.RepoFile = path.Join(a.Helm.DataDir, "repo/repositories.yaml")
+	a.Helm.RepoCache = path.Join(a.Helm.DataDir, "cache")
+	a.Helm.ChartCache = path.Join(a.Helm.DataDir, "chart")
 }
 
 //SetLog 设置log

@@ -23,6 +23,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/goodrain/rainbond/util/commonutil"
 )
 
 //Model 默认字段
@@ -81,6 +83,9 @@ var ServiceKindThirdParty ServiceKind = "third_party"
 // ServiceKindInternal means internal service
 var ServiceKindInternal ServiceKind = "internal"
 
+// ServiceKindCustom means custom component define
+var ServiceKindCustom ServiceKind = "custom.componentdefinition."
+
 func (s ServiceKind) String() string {
 	return string(s)
 }
@@ -112,21 +117,21 @@ func (s ServiceType) IsSingleton() bool {
 	return true
 }
 
-// TODO fanyangyang 根据组件简单判断是否是有状态
 // IsState is state service or stateless service
-func (ts *TenantServices) IsState() bool {
-	if ts.ExtendMethod == "" {
+// TODO fanyangyang 根据组件简单判断是否是有状态
+func (t *TenantServices) IsState() bool {
+	if t.ExtendMethod == "" {
 		return false
 	}
-	return ServiceType(ts.ExtendMethod).IsState()
+	return ServiceType(t.ExtendMethod).IsState()
 }
 
 // IsSingleton is singleton or multiple service
-func (ts *TenantServices) IsSingleton() bool {
-	if ts.ExtendMethod == "" {
+func (t *TenantServices) IsSingleton() bool {
+	if t.ExtendMethod == "" {
 		return false
 	}
-	return ServiceType(ts.ExtendMethod).IsSingleton()
+	return ServiceType(t.ExtendMethod).IsSingleton()
 }
 
 // ServiceTypeUnknown unknown
@@ -163,6 +168,9 @@ type TenantServices struct {
 	ContainerCPU int `gorm:"column:container_cpu;default:500" json:"container_cpu"`
 	// 容器最大内存
 	ContainerMemory int `gorm:"column:container_memory;default:128" json:"container_memory"`
+	// container GPU, The amount of video memory applied for GPU. The unit is MiB
+	// default is 0, That means no GPU is required
+	ContainerGPU int `gorm:"column:container_gpu;default:0" json:"container_gpu"`
 	//UpgradeMethod service upgrade controller type
 	//such as : `Rolling` `OnDelete`
 	UpgradeMethod string `gorm:"column:upgrade_method;default:'Rolling'" json:"upgrade_method"`
@@ -186,7 +194,7 @@ type TenantServices struct {
 	UpdateTime time.Time `gorm:"column:update_time" json:"update_time"`
 	// 服务创建类型cloud云市服务,assistant云帮服务
 	ServiceOrigin string `gorm:"column:service_origin;default:'assistant'" json:"service_origin"`
-	// kind of service. option: internal, third_party
+	// kind of service. option: internal, third_party, custom
 	Kind string `gorm:"column:kind;default:'internal'" json:"kind"`
 	// service bind appID
 	AppID string `gorm:"column:app_id" json:"app_id"`
@@ -271,6 +279,9 @@ type TenantServicesDelete struct {
 	ContainerCPU int `gorm:"column:container_cpu;default:500" json:"container_cpu"`
 	// 容器最大内存
 	ContainerMemory int `gorm:"column:container_memory;default:128" json:"container_memory"`
+	// container GPU, The amount of video memory applied for GPU. The unit is MiB
+	// default is 0, That means no GPU is required
+	ContainerGPU int `gorm:"column:container_gpu;default:0" json:"container_gpu"`
 	//UpgradeMethod service upgrade controller type
 	//such as : `Rolling` `OnDelete`
 	UpgradeMethod string `gorm:"column:upgrade_method;default:'Rolling'" json:"upgrade_method"`
@@ -319,9 +330,19 @@ type TenantServicesPort struct {
 	K8sServiceName string `gorm:"column:k8s_service_name" json:"k8s_service_name"`
 }
 
+// Key returns the key of TenantServicesPort.
+func (t *TenantServicesPort) Key() string {
+	return fmt.Sprintf("%s/%s/%d", t.TenantID, t.ServiceID, t.ContainerPort)
+}
+
 //TableName 表名
 func (t *TenantServicesPort) TableName() string {
 	return "tenant_services_port"
+}
+
+// IsOpen checks if the port is opened.
+func (t *TenantServicesPort) IsOpen() bool {
+	return commonutil.BoolValue(t.IsOuterService) || commonutil.BoolValue(t.IsInnerService)
 }
 
 //TenantServiceLBMappingPort stream应用端口映射情况
@@ -440,7 +461,7 @@ type TenantServiceVolume struct {
 	//挂载地址
 	VolumePath string `gorm:"column:volume_path" json:"volume_path"`
 	//是否只读
-	IsReadOnly bool `gorm:"column:is_read_only;default:false" json:"is_read_only"`
+	IsReadOnly bool `gorm:"column:is_read_only;default:0" json:"is_read_only"`
 	// VolumeCapacity 存储大小
 	VolumeCapacity int64 `gorm:"column:volume_capacity" json:"volume_capacity"`
 	// AccessMode 读写模式（Important! A volume can only be mounted using one access mode at a time, even if it supports many. For example, a GCEPersistentDisk can be mounted as ReadWriteOnce by a single node or ReadOnlyMany by many nodes, but not at the same time. #https://kubernetes.io/docs/concepts/storage/persistent-volumes/#access-modes）
@@ -454,12 +475,17 @@ type TenantServiceVolume struct {
 	// AllowExpansion 是否支持扩展
 	AllowExpansion bool `gorm:"column:allow_expansion" json:"allow_expansion"`
 	// VolumeProviderName 使用的存储驱动别名
-	VolumeProviderName string `gorm:"collumn:volume_provider_name" json:"volume_provider_name"`
+	VolumeProviderName string `gorm:"column:volume_provider_name" json:"volume_provider_name"`
 }
 
 //TableName 表名
 func (t *TenantServiceVolume) TableName() string {
 	return "tenant_services_volume"
+}
+
+// Key returns the key of TenantServiceVolume.
+func (t *TenantServiceVolume) Key() string {
+	return fmt.Sprintf("%s/%s", t.ServiceID, t.VolumeName)
 }
 
 // TenantServiceConfigFile represents a data in configMap which is one of the types of volumes
@@ -494,8 +520,8 @@ var LabelKeyNodeSelector = "node-selector"
 //LabelKeyNodeAffinity 节点亲和标签
 var LabelKeyNodeAffinity = "node-affinity"
 
-// TODO fanyangyang 待删除，组件类型记录在tenant_service表中
 //LabelKeyServiceType 应用部署类型标签
+// TODO fanyangyang 待删除，组件类型记录在tenant_service表中
 var LabelKeyServiceType = "service-type"
 
 //LabelKeyServiceAffinity 应用亲和标签
